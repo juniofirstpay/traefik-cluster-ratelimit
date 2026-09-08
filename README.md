@@ -95,6 +95,7 @@ The `average` and the `burst` are the number of allowed connection per second, t
 | redisAddress                | address of the redis server                        | redis:6379 |
 | redisDb                     | redis db to use                                    | 0          |
 | redisPassword               | redis authentication (if any)                      |            |
+| redisPasswordFile           | **path** whose contents are the AUTH argument, re-read on every dial and trimmed of surrounding whitespace. For a **rotating** credential (an ElastiCache/Valkey auth token rendered by a Vault-Agent sidecar) `redisPassword` cannot work: a literal, or an env var fixed for the life of the process, goes stale at the first rotation. Mutually exclusive with `redisPassword` — setting both is an error at load | |
 | redisUsername               | redis ACL username. Set it to use the two-argument `AUTH <user> <pass>` form (Redis 6+); empty keeps the single-argument form | |
 | redisTls                    | connect over TLS with no trust material of our own — for an endpoint presenting a publicly-rooted certificate. Implied by any of the four below | false |
 | redisCaCertFile             | PEM bundle the server certificate is verified against | |
@@ -132,6 +133,8 @@ The `average` and the `burst` are the number of allowed connection per second, t
 Notes:
 - for more information about sourceCriteron check the Traefik [ratelimit](https://doc.traefik.io/traefik/middlewares/http/ratelimit/) page
 - regarding redispassword, if you dont want to set it in clear text in the traefik configuration, you can specify a variable name starting with '$'. For example `$REDIS_PASSWORD` will use the `REDIS_PASSWORD` environment variable
+- regarding redisPasswordFile, the value is a path and is taken literally — there is no `$` indirection, unlike `redisPassword`. The file is read at **dial** time, not at load, so a rotated token is picked up on the next connection and a gateway that starts before its secret has been rendered heals itself on the next request instead of needing a restart
+- against **AWS ElastiCache/Valkey**, `redisTls: true` on its own is what you want: it verifies against the system roots, which is where the public Amazon chain is anchored. Do not also set `redisCaCertFile` to a private mesh CA — it *replaces* the system roots and the handshake fails
 - whitelistIPs allows you to specify IP addresses or CIDR ranges that will completely bypass rate limiting. This is useful when you have groups of users sharing the same IP address. The IP extraction for whitelist checking uses the same IP strategy as defined in sourceCriterion.ipStrategy, or falls back to RemoteAddr if not specified.
 
 A full example would be
