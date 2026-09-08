@@ -245,7 +245,17 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 			return nil, fmt.Errorf("unable to create IP strategy: %v", err)
 		}
 	default:
-		ipStrategy = &ip.RemoteAddrStrategy{}
+		// No silent fallback. Upstream defaults an absent sourceCriterion to
+		// RemoteAddr, which behind any proxy resolves every client to the
+		// proxy's own address and collapses them into one bucket — a defect
+		// that is invisible from the outside and can sit unnoticed for months.
+		//
+		// Requiring the choice means deleting trustedProxies is loud: the
+		// middleware fails to build and the router is dropped at deploy time,
+		// rather than quietly degrading. `sourceCriterion.ipStrategy: {}` is
+		// the explicit way to ask for RemoteAddr.
+		return nil, fmt.Errorf("a client-IP derivation must be configured explicitly: set " +
+			"trustedProxies, or sourceCriterion.ipStrategy (an empty ipStrategy means RemoteAddr)")
 	}
 
 	client, err := redis.NewClient(redis.Options{
@@ -284,8 +294,43 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	}, nil
 }
 
+// destroyedHeaders are removed from every request, unconditionally, before any
+// other decision this middleware makes.
+//
+// Forwarded  RFC 7239, and the one that bites hardest: frameworks that resolve
+//
+//	a client address commonly prefer it OVER X-Forwarded-For — Falcon
+//	does — so a client sending `Forwarded: for=1.2.3.4` overrides the
+//	real chain. An edge that filters only `X-Forwarded-For` does not
+//	cover it.
+//
+// X-Real-IP  commonly consulted as a fallback, and a reverse proxy sets it to
+//
+//	its own socket peer — a load-balancer node, never the client. It
+//	is wrong AND client-settable, which is the worst pair.
+//
+// X-Forwarded-For is deliberately LEFT INTACT. Downstream services read it and
+// the derivation depends on it; removing it would break both.
+//
+// Underscore and dot aliases (X_Forwarded_For, X.Real.IP) cannot be handled
+// here — Go canonicalises header keys on the way in, and a WSGI/CGI backend
+// folds them onto the same variable as the canonical form. That belongs at the
+// proxy's entrypoint; in Traefik it is http.aliasHeadersStrategy: delete.
+var destroyedHeaders = []string{
+	"Forwarded",
+	"X-Real-IP",
+}
+
 func (rl *ClusterRateLimit) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	// cf https://medium.com/@bingolbalihasan/redis-rate-limiting-in-go-d342bab3d930
+
+	// FIRST, before anything can read them and before any early return. An
+	// unlimited route (average = 0) still gets the destruction: whether a route
+	// is rate limited says nothing about whether its backend should be handed a
+	// client-settable address header.
+	for _, h := range destroyedHeaders {
+		req.Header.Del(h)
+	}
 
 	// average = 0 means unlimited
 	if rl.average == 0 {
