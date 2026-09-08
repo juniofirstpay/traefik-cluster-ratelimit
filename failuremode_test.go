@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/juniofirstpay/traefik-cluster-ratelimit/internal/redis"
@@ -88,6 +89,7 @@ func TestDefaultsToClosed(t *testing.T) {
 	cfg.Average = 10
 	cfg.Burst = 10
 	cfg.RedisAddress = "127.0.0.1:1" // never connects; New must not dial
+	cfg.TrustedProxies = []string{"10.10.0.0/24"}
 	next := http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {})
 
 	h, err := New(context.Background(), next, cfg, "test")
@@ -104,10 +106,15 @@ func TestRejectsUnknownFailureMode(t *testing.T) {
 	cfg := CreateConfig()
 	cfg.Average = 10
 	cfg.Burst = 10
-	cfg.FailureMode = "clsoed" // typo
+	cfg.TrustedProxies = []string{"10.10.0.0/24"} // so the failure is unambiguous
+	cfg.FailureMode = "clsoed"                    // typo
 	next := http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {})
 
-	if _, err := New(context.Background(), next, cfg, "test"); err == nil {
-		t.Fatal("expected a typo'd failureMode to be rejected at load")
+	// Assert on the message, not merely that an error occurred: with a
+	// derivation now mandatory, an under-specified config errors for a
+	// DIFFERENT reason and this test would pass without proving anything.
+	_, err := New(context.Background(), next, cfg, "test")
+	if err == nil || !strings.Contains(err.Error(), "failureMode") {
+		t.Fatalf("expected a typo'd failureMode to be rejected at load, got %v", err)
 	}
 }

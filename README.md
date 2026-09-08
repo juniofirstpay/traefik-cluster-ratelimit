@@ -103,6 +103,10 @@ The `average` and the `burst` are the number of allowed connection per second, t
 | redisServerName             | name verified against the server certificate; derived from `redisAddress` when empty | |
 | failureMode                 | what happens when Redis is unreachable: `closed` rejects with 503 + Retry-After, `open` lets requests through unlimited. **This fork defaults to `closed`, where upstream fails open** | closed |
 | ipv6Subnet                  | prefix an IPv6 client address is aggregated to before it becomes a rate-limit key. Range **32-64**; `128` is rejected because it would mean no aggregation, which OS privacy extensions defeat by default. IPv4 is never aggregated | 64 |
+> **This fork destroys `Forwarded` and `X-Real-IP` on every request**, before anything else, whether or not the route is rate limited. Both are client-settable and both are preferred over `X-Forwarded-For` by common frameworks, so leaving them in place lets a client dictate the address a backend records. `X-Forwarded-For` is left intact. Underscore aliases (`X_Forwarded_For`) must be handled at the proxy entrypoint — in Traefik, `http.aliasHeadersStrategy: delete`.
+>
+> **A client-IP derivation must be configured explicitly.** Set `trustedProxies`, or `sourceCriterion.ipStrategy` (an empty `ipStrategy` means `RemoteAddr`). Upstream defaults to `RemoteAddr` silently; behind any proxy that resolves every client to the proxy's own address and collapses them into one bucket, which is invisible from the outside.
+
 | trustedProxies              | addresses/CIDRs that are your own infrastructure. Selects the **trusted-proxy walk**: anchor on the socket peer, walk `X-Forwarded-For` right-to-left skipping these, take the first that is not one. Position-independent, so the same config is correct at the edge and one hop further in. Mutually exclusive with `sourceCriterion.ipStrategy` — setting both is an error at load | |
 | sourceCriterion.*           | defines what criterion is used to group requests. See next | ipStrategy |
 | sourceCriterion.ipStrategy  | client IP based source                             |            |
