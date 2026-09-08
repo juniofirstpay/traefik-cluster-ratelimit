@@ -108,7 +108,7 @@ func TestPool(t *testing.T) {
 		// Start the mock server in a separate goroutine
 		port := startMockServer(stopChan, &wg)
 
-		client, err := NewClient(fmt.Sprintf("localhost:%d", port), 0, "", 2*time.Second)
+		client, err := NewClient(Options{Addr: fmt.Sprintf("localhost:%d", port), ConnectionTimeout: 2 * time.Second})
 		assert.NotNil(t, client)
 		assert.Nil(t, err)
 
@@ -128,7 +128,7 @@ func TestPool(t *testing.T) {
 		// Start the mock server in a separate goroutine
 		port := startMockServer(stopChan, &wg)
 
-		client, err := NewClient(fmt.Sprintf("localhost:%d", port), 0, "", 2*time.Second)
+		client, err := NewClient(Options{Addr: fmt.Sprintf("localhost:%d", port), ConnectionTimeout: 2 * time.Second})
 		assert.NotNil(t, client)
 		assert.Nil(t, err)
 

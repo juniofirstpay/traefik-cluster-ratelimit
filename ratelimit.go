@@ -52,6 +52,24 @@ type Config struct {
 	// WhitelistIPs is a list of IP addresses or CIDR ranges that will bypass rate limiting.
 	// If an IP matches any entry in this list, the rate limit check is skipped entirely.
 	WhitelistIPs []string `json:"whitelistIPs,omitempty" yaml:"whitelistIPs,omitempty"`
+	// RedisUsername, when set, selects the two-argument `AUTH <username> <password>`
+	// form introduced with Redis 6 ACLs. Left empty, the existing single-argument
+	// `AUTH <password>` form is used, so existing deployments are unaffected.
+	// Like RedisPassword it accepts a '$'-prefixed environment variable name.
+	RedisUsername string `json:"redisUsername,omitempty" yaml:"redisUsername,omitempty"`
+	// RedisTLS connects over TLS with no trust material of our own — what a
+	// managed endpoint presenting a publicly-rooted certificate needs. It is
+	// also implied by any of the four settings below.
+	RedisTLS bool `json:"redisTls,omitempty" yaml:"redisTls,omitempty"`
+	// RedisCaCertFile is a PEM bundle the server certificate is verified against.
+	RedisCaCertFile string `json:"redisCaCertFile,omitempty" yaml:"redisCaCertFile,omitempty"`
+	// RedisClientCertFile and RedisClientKeyFile are an optional client keypair
+	// for mutual TLS. They must be set together.
+	RedisClientCertFile string `json:"redisClientCertFile,omitempty" yaml:"redisClientCertFile,omitempty"`
+	RedisClientKeyFile  string `json:"redisClientKeyFile,omitempty" yaml:"redisClientKeyFile,omitempty"`
+	// RedisServerName is the name verified against the server certificate.
+	// Derived from RedisAddress when empty.
+	RedisServerName string `json:"redisServerName,omitempty" yaml:"redisServerName,omitempty"`
 }
 
 // CreateConfig creates the default plugin configuration.
@@ -100,6 +118,10 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	if len(config.RedisPassword) > 1 && config.RedisPassword[0] == '$' {
 		config.RedisPassword = os.Getenv(config.RedisPassword[1:])
 	}
+	// same indirection for the ACL username
+	if len(config.RedisUsername) > 1 && config.RedisUsername[0] == '$' {
+		config.RedisUsername = os.Getenv(config.RedisUsername[1:])
+	}
 
 	sourceMatcher, err := utils.GetSourceExtractor(config.SourceCriterion)
 	if err != nil {
@@ -126,12 +148,18 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		ipStrategy = &ip.RemoteAddrStrategy{}
 	}
 
-	client, err := redis.NewClient(
-		config.RedisAddress,
-		config.RedisDB,
-		config.RedisPassword,
-		time.Duration(config.RedisConnectionTimeout)*time.Second,
-	)
+	client, err := redis.NewClient(redis.Options{
+		Addr:              config.RedisAddress,
+		DB:                config.RedisDB,
+		Username:          config.RedisUsername,
+		Password:          config.RedisPassword,
+		ConnectionTimeout: time.Duration(config.RedisConnectionTimeout) * time.Second,
+		TLS:               config.RedisTLS,
+		CACertFile:        config.RedisCaCertFile,
+		ClientCertFile:    config.RedisClientCertFile,
+		ClientKeyFile:     config.RedisClientKeyFile,
+		ServerName:        config.RedisServerName,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create redis client: %v", err)
 	}
