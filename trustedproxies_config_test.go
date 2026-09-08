@@ -117,3 +117,79 @@ func TestRequestHostBucketingStillWins(t *testing.T) {
 		t.Fatalf("the walk should still derive the client for the whitelist: got %q", got)
 	}
 }
+
+// TestIPv6SubnetBounds — the range is what stops the option becoming an
+// off-switch. 128 is the address itself, i.e. no aggregation.
+func TestIPv6SubnetBounds(t *testing.T) {
+	for _, bad := range []int{128, 65, 31, 1, -1} {
+		c := baseConfig()
+		c.TrustedProxies = []string{"10.10.0.0/24"}
+		c.IPv6Subnet = bad
+		if _, err := New(context.Background(), http.NotFoundHandler(), c, "test"); err == nil {
+			t.Fatalf("ipv6Subnet %d should be rejected at load", bad)
+		}
+	}
+	for _, ok := range []int{32, 48, 56, 64} {
+		c := baseConfig()
+		c.TrustedProxies = []string{"10.10.0.0/24"}
+		c.IPv6Subnet = ok
+		if _, err := New(context.Background(), http.NotFoundHandler(), c, "test"); err != nil {
+			t.Fatalf("ipv6Subnet %d should be accepted: %v", ok, err)
+		}
+	}
+}
+
+// TestIPv6SubnetDefaults — omitting it must aggregate, not disable.
+func TestIPv6SubnetDefaults(t *testing.T) {
+	c := baseConfig()
+	c.TrustedProxies = []string{"10.10.0.0/24"}
+	if _, err := New(context.Background(), http.NotFoundHandler(), c, "test"); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if c.IPv6Subnet != 64 {
+		t.Fatalf("omitted ipv6Subnet must default to 64, got %d", c.IPv6Subnet)
+	}
+}
+
+// TestIPv6ClientsShareABucket drives it through the real source extractor: a
+// rotating IPv6 client must not get a fresh bucket per address.
+func TestIPv6ClientsShareABucket(t *testing.T) {
+	c := baseConfig()
+	c.TrustedProxies = []string{"10.10.0.0/24"}
+	h, err := New(context.Background(), http.NotFoundHandler(), c, "test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rl := h.(*ClusterRateLimit)
+
+	key := func(xff string) string {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.RemoteAddr = "10.10.0.7:52000"
+		r.Header.Set("X-Forwarded-For", xff)
+		k, _, err := rl.sourceMatcher.Extract(r)
+		if err != nil {
+			t.Fatalf("Extract: %v", err)
+		}
+		return k
+	}
+
+	a := key("2001:db8:cafe:1::1")
+	b := key("2001:db8:cafe:1:f8a2:9c31:0e77:4b21")
+	if a != b {
+		t.Fatalf("a rotating IPv6 client got two buckets: %q and %q", a, b)
+	}
+	if c := key("2001:db8:cafe:2::1"); c == a {
+		t.Fatalf("a different /64 shared the bucket: %q", c)
+	}
+	// IPv4 must be untouched by any of this.
+	if k := key("203.0.113.9"); k != "203.0.113.9" {
+		t.Fatalf("IPv4 key was aggregated: %q", k)
+	}
+	// ...and the whitelist check still sees the FULL address, not the subnet.
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.RemoteAddr = "10.10.0.7:52000"
+	r.Header.Set("X-Forwarded-For", "2001:db8:cafe:1::1")
+	if got := rl.ipStrategy.GetIP(r); got != "2001:db8:cafe:1::1" {
+		t.Fatalf("identity should stay the full address, got %q", got)
+	}
+}
