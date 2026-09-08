@@ -138,6 +138,7 @@ type ClusterRateLimit struct {
 	whitelistChecker *ip.Checker
 	ipStrategy       ip.Strategy
 	failureMode      string
+	ipv6Subnet       int
 	// retryAfter is what a fail-closed rejection advertises. The breaker's
 	// reattempt period is the honest answer: it is when we will next try Redis,
 	// so it is the earliest moment the answer could change.
@@ -290,6 +291,7 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		whitelistChecker: whitelistChecker,
 		ipStrategy:       ipStrategy,
 		failureMode:      config.FailureMode,
+		ipv6Subnet:       config.IPv6Subnet,
 		retryAfter:       config.BreakerReattempt,
 	}, nil
 }
@@ -319,7 +321,28 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 var destroyedHeaders = []string{
 	"Forwarded",
 	"X-Real-IP",
+	// Any inbound copy of what this middleware publishes. Destroying them is
+	// what makes the published values trustworthy: a downstream service can
+	// rely on them because a client cannot supply them.
+	HeaderClientIP,
+	HeaderClientIPSource,
+	HeaderClientSubnet,
 }
+
+// Headers published to the backend. Private names, deliberately, rather than
+// RFC 7239 Forwarded: a reader cannot tell from `Forwarded` whether a value is
+// gateway-authoritative or client-supplied, because clients send it too.
+const (
+	// HeaderClientIP carries the derived client address — the identity.
+	HeaderClientIP = "Gateway-Connecting-IP"
+	// HeaderClientIPSource carries which exit of the walk produced it — the
+	// provenance. Published only when trustedProxies is in use; depth and pool
+	// selection have no notion of which exit they took.
+	HeaderClientIPSource = "Gateway-Connecting-IP-Source"
+	// HeaderClientSubnet carries the aggregate the limiter keys on, in CIDR
+	// notation — the rate-limit key.
+	HeaderClientSubnet = "Gateway-Connecting-Subnet"
+)
 
 func (rl *ClusterRateLimit) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	// cf https://medium.com/@bingolbalihasan/redis-rate-limiting-in-go-d342bab3d930
@@ -332,21 +355,37 @@ func (rl *ClusterRateLimit) ServeHTTP(rw http.ResponseWriter, req *http.Request)
 		req.Header.Del(h)
 	}
 
+	// Derive once, then publish. Both happen before the unlimited early return:
+	// whether a route is rate limited says nothing about whether its backend
+	// wants to know who the caller is.
+	var clientIP string
+	if rl.ipStrategy != nil {
+		clientIP = rl.ipStrategy.GetIP(req)
+	}
+	if clientIP != "" {
+		req.Header.Set(HeaderClientIP, clientIP)
+		req.Header.Set(HeaderClientSubnet, ip.SubnetCIDR(clientIP, rl.ipv6Subnet))
+		if resolver, ok := rl.ipStrategy.(ip.Resolver); ok {
+			if _, source := resolver.Resolve(req); source != "" {
+				req.Header.Set(HeaderClientIPSource, string(source))
+			}
+		}
+	}
+
 	// average = 0 means unlimited
 	if rl.average == 0 {
 		rl.next.ServeHTTP(rw, req)
 		return
 	}
 
-	// Check if IP is whitelisted - if so, bypass rate limiting entirely
-	if rl.whitelistChecker != nil {
-		clientIP := rl.ipStrategy.GetIP(req)
-		if clientIP != "" {
-			contains, err := rl.whitelistChecker.Contains(clientIP)
-			if err == nil && contains {
-				rl.next.ServeHTTP(rw, req)
-				return
-			}
+	// Check if IP is whitelisted - if so, bypass rate limiting entirely.
+	// Matched on the FULL address, not the aggregate: whitelisting a single
+	// host should be possible, and a whole prefix is expressible as a CIDR.
+	if rl.whitelistChecker != nil && clientIP != "" {
+		contains, err := rl.whitelistChecker.Contains(clientIP)
+		if err == nil && contains {
+			rl.next.ServeHTTP(rw, req)
+			return
 		}
 	}
 
