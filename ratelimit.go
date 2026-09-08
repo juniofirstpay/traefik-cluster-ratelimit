@@ -101,6 +101,18 @@ type Config struct {
 	// per subnet and the provider adds and removes them without notice, so an
 	// enumerated list of node addresses rots silently.
 	TrustedProxies []string `json:"trustedProxies,omitempty" yaml:"trustedProxies,omitempty"`
+	// IPv6Subnet is the prefix length an IPv6 client address is aggregated to
+	// before it becomes a rate-limit key. Defaults to 64.
+	//
+	// Aggregation is UNCONDITIONAL — there is no mode and no off switch. An
+	// IPv6 client is allocated a network, not an address, and OS privacy
+	// extensions rotate the low bits by default, so per-address limiting does
+	// not constrain it at all. Accepted range is 32-64: 128 would mean the
+	// address itself, which is the bypass this closes.
+	//
+	// IPv4 is never aggregated regardless. CGNAT already puts many unrelated
+	// subscribers behind one address.
+	IPv6Subnet int `json:"ipv6Subnet,omitempty" yaml:"ipv6Subnet,omitempty"`
 }
 
 // CreateConfig creates the default plugin configuration.
@@ -174,6 +186,15 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		config.RedisUsername = os.Getenv(config.RedisUsername[1:])
 	}
 
+	if config.IPv6Subnet == 0 {
+		config.IPv6Subnet = ip.DefaultIPv6Subnet
+	}
+	if config.IPv6Subnet < ip.MinIPv6Subnet || config.IPv6Subnet > ip.MaxIPv6Subnet {
+		return nil, fmt.Errorf("ipv6Subnet must be between %d and %d, got %d: %d would disable "+
+			"aggregation entirely, which is the bypass it exists to close",
+			ip.MinIPv6Subnet, ip.MaxIPv6Subnet, config.IPv6Subnet, config.IPv6Subnet)
+	}
+
 	hasIPStrategy := config.SourceCriterion != nil && config.SourceCriterion.IPStrategy != nil
 	if len(config.TrustedProxies) > 0 && hasIPStrategy {
 		return nil, fmt.Errorf("trustedProxies and sourceCriterion.ipStrategy are mutually exclusive: " +
@@ -210,8 +231,12 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		// explicitly buckets by something that is not an IP at all.
 		if config.SourceCriterion == nil ||
 			(config.SourceCriterion.RequestHeaderName == "" && !config.SourceCriterion.RequestHost) {
+			ipv6Prefix := config.IPv6Subnet
 			sourceMatcher = utils.ExtractorFunc(func(req *http.Request) (string, int64, error) {
-				return walk.GetIP(req), 1, nil
+				// The bucket key is the AGGREGATE. Identity stays the full
+				// address — the whitelist check below still uses it, and it is
+				// what an audit trail wants.
+				return ip.Subnet(walk.GetIP(req), ipv6Prefix), 1, nil
 			})
 		}
 	case hasIPStrategy:

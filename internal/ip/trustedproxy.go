@@ -132,3 +132,47 @@ func remoteAddrIP(req *http.Request) string {
 	}
 	return req.RemoteAddr
 }
+
+// IPv6 aggregation bounds. The floor keeps a prefix from merging unrelated
+// networks; the ceiling is what makes this impossible to switch off.
+//
+// /64 is the safe default because it is the smallest allocation that exists —
+// SLAAC requires 64 bits for the host portion, so every client controls at
+// least one /64 and aggregating there can never merge two customers. Sites are
+// often delegated more (a /56 or /48 is ordinary for home and business
+// connections), so a deployment that knows its upstream allocation policy can
+// aggregate wider and count a whole site as one client.
+//
+// 128 is deliberately NOT accepted. A /128 is the address itself, i.e. no
+// aggregation, i.e. the bypass this exists to close: OS privacy extensions
+// (RFC 4941) rotate the low bits by default, so per-address limiting does not
+// constrain an IPv6 client at all. Allowing 128 would make the option an
+// off-switch, and an off-switch is what turns a control into a suggestion.
+const (
+	MinIPv6Subnet     = 32
+	MaxIPv6Subnet     = 64
+	DefaultIPv6Subnet = 64
+)
+
+// Subnet reduces a derived address to the aggregate a rate limiter should key
+// on: the /ipv6Prefix network for IPv6, the address unchanged for IPv4.
+//
+// IPv4 is deliberately never aggregated. Carrier-grade NAT already places many
+// unrelated subscribers behind a single address — on Indian mobile networks
+// especially — so widening beyond /32 would bucket strangers together and
+// punish them for each other's traffic.
+//
+// The caller keeps the full address for identity and audit; this is only the
+// bucket key.
+func Subnet(addr string, ipv6Prefix int) string {
+	parsed := net.ParseIP(addr)
+	if parsed == nil {
+		// Not an address we can reason about — pass it through rather than
+		// inventing a key. Callers never hand us an empty string.
+		return addr
+	}
+	if parsed.To4() != nil {
+		return addr
+	}
+	return parsed.Mask(net.CIDRMask(ipv6Prefix, 128)).String()
+}

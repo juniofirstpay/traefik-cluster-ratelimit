@@ -102,6 +102,7 @@ The `average` and the `burst` are the number of allowed connection per second, t
 | redisClientKeyFile          | client key for mutual TLS (must be set with the cert) | |
 | redisServerName             | name verified against the server certificate; derived from `redisAddress` when empty | |
 | failureMode                 | what happens when Redis is unreachable: `closed` rejects with 503 + Retry-After, `open` lets requests through unlimited. **This fork defaults to `closed`, where upstream fails open** | closed |
+| ipv6Subnet                  | prefix an IPv6 client address is aggregated to before it becomes a rate-limit key. Range **32-64**; `128` is rejected because it would mean no aggregation, which OS privacy extensions defeat by default. IPv4 is never aggregated | 64 |
 | trustedProxies              | addresses/CIDRs that are your own infrastructure. Selects the **trusted-proxy walk**: anchor on the socket peer, walk `X-Forwarded-For` right-to-left skipping these, take the first that is not one. Position-independent, so the same config is correct at the edge and one hop further in. Mutually exclusive with `sourceCriterion.ipStrategy` — setting both is an error at load | |
 | sourceCriterion.*           | defines what criterion is used to group requests. See next | ipStrategy |
 | sourceCriterion.ipStrategy  | client IP based source                             |            |
