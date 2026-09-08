@@ -32,6 +32,7 @@ type ClientImpl struct {
 	dialTimeout       time.Duration
 	username          string
 	auth              string
+	authFile          string
 	db                int
 	connectionTimeout time.Duration
 	tlsCfg            *tls.Config
@@ -48,8 +49,13 @@ type Options struct {
 	// form introduced with Redis 6 ACLs. Empty keeps the single-argument
 	// `AUTH <password>` form, so existing deployments are unaffected.
 	Username string
-	// Password is the AUTH secret.
+	// Password is the AUTH secret, as a literal.
 	Password string
+	// PasswordFile is a path whose CONTENTS are the AUTH secret, re-read on
+	// every dial rather than once here. It is how a rotating credential is
+	// carried — see authSecret for why the read cannot be hoisted into
+	// NewClient. Mutually exclusive with Password.
+	PasswordFile string
 	// ConnectionTimeout bounds each read and write, and — doubled — the dial.
 	ConnectionTimeout time.Duration
 
@@ -135,6 +141,16 @@ func NewClient(o Options) (Client, error) {
 		return nil, errors.New("maxActive must be greater than 0")
 	}
 
+	// A literal and a file are two answers to the same question. The plugin
+	// layer rejects the pair first, on the values as written; this keeps the
+	// invariant total for any other caller of Options, because the alternative
+	// here is a silent precedence rule — exactly the failure this option
+	// exists to avoid, where the operator's rotating token is ignored in
+	// favour of a stale literal and nothing says so.
+	if o.Password != "" && o.PasswordFile != "" {
+		return nil, errors.New("redis: redisPassword and redisPasswordFile are mutually exclusive")
+	}
+
 	var tlsCfg *tls.Config
 	if tlsRequested(o) {
 		var err error
@@ -151,6 +167,7 @@ func NewClient(o Options) (Client, error) {
 		dialTimeout:       o.ConnectionTimeout * 2,
 		username:          o.Username,
 		auth:              o.Password,
+		authFile:          o.PasswordFile,
 		db:                int(o.DB),
 		connectionTimeout: o.ConnectionTimeout,
 		tlsCfg:            tlsCfg,
@@ -168,6 +185,15 @@ func NewClient(o Options) (Client, error) {
 }
 
 func (r *ClientImpl) newConn() (net.Conn, error) {
+	// Resolve the secret BEFORE dialing. When it comes from a file the read
+	// can fail, and failing here costs nothing to unwind: no socket is open
+	// yet, and there is no point completing a TCP connect and a TLS handshake
+	// to a server we already know we cannot authenticate to.
+	secret, err := r.authSecret()
+	if err != nil {
+		return nil, err
+	}
+
 	tcp, err := net.DialTimeout("tcp", r.addr, r.dialTimeout)
 	if err != nil {
 		return nil, err
@@ -197,15 +223,15 @@ func (r *ClientImpl) newConn() (net.Conn, error) {
 		conn = tc
 	}
 
-	if r.auth != "" {
+	if secret != "" {
 		// Two-argument AUTH when a username is configured (Redis 6+ ACLs),
-		// single-argument otherwise.
+		// single-argument otherwise. The username is a stable identity, so it
+		// stays a literal even when the password rotates on disk.
 		var resp *RedisResult
-		var err error
 		if r.username != "" {
-			resp, err = sendCommand(conn, r.connectionTimeout, "AUTH", r.username, r.auth)
+			resp, err = sendCommand(conn, r.connectionTimeout, "AUTH", r.username, secret)
 		} else {
-			resp, err = sendCommand(conn, r.connectionTimeout, "AUTH", r.auth)
+			resp, err = sendCommand(conn, r.connectionTimeout, "AUTH", secret)
 		}
 		if err != nil {
 			_ = conn.Close()
@@ -226,6 +252,54 @@ func (r *ClientImpl) newConn() (net.Conn, error) {
 		return nil, fmt.Errorf("not able to select db %d (%s)", r.db, resp.Result)
 	}
 	return conn, nil
+}
+
+// authSecret is the AUTH argument for THIS dial. A literal password is handed
+// straight back; a password FILE is re-read every time.
+//
+// Re-reading is the whole point of the file form, not an oversight. The
+// credential it holds is a rotating token — an ElastiCache/Valkey auth token
+// re-rendered by a Vault-Agent sidecar — so a value captured once in NewClient
+// goes stale at the first rotation and every connection after it fails, with
+// no way back short of restarting Traefik. Reading per dial also makes the
+// start-order race survivable: a gateway that comes up BEFORE the sidecar has
+// rendered the file still loads (pool prepopulation tolerates dial failures),
+// and the first request that misses the pool re-reads the file and connects.
+//
+// Deliberately no cache and no last-good fallback, unlike the sibling
+// gwvalidator plugin that inspired this: a dial here already pays a TCP
+// connect, possibly a TLS handshake, and two round trips, next to which one
+// small read is noise — and going without removes both the staleness window
+// and the lock. A read that fails fails only this dial, which is precisely
+// what an unreachable Redis already is: the breaker counts it and failureMode
+// decides.
+func (r *ClientImpl) authSecret() (string, error) {
+	if r.authFile == "" {
+		return r.auth, nil
+	}
+	return readPasswordFile(r.authFile)
+}
+
+// readPasswordFile reads the AUTH argument from disk, trimmed of surrounding
+// whitespace. The trim is not cosmetic: a rendered secret file ends in a
+// newline, and a token carrying a stray \n is refused by AUTH with the same
+// answer as a genuinely wrong credential, so the config looks right, the file
+// looks right, and the only symptom is a connection that will not authenticate.
+//
+// An empty file is an error rather than a connection that silently skips AUTH:
+// something asked for a password, and connecting without one is not the milder
+// failure. It is also the shape of a half-written render, which the next dial
+// will get right. The contents never appear in the returned error.
+func readPasswordFile(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", errors.New("redis: reading redisPasswordFile " + path + ": " + err.Error())
+	}
+	secret := strings.TrimSpace(string(raw))
+	if secret == "" {
+		return "", errors.New("redis: redisPasswordFile " + path + " is empty")
+	}
+	return secret, nil
 }
 
 // Get retrieves a connection from the pool

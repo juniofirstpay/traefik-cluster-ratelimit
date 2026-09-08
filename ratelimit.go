@@ -25,6 +25,24 @@ type Config struct {
 	// you can use an environment variable, and put the name of the env variable here
 	// prefixed with '$'. For example '$REDIS_AUTH_PASSWORD'
 	RedisPassword string `json:"redisPassword,omitempty" yaml:"redisPassword,omitempty"`
+	// RedisPasswordFile is a PATH whose contents are the AUTH argument. It is
+	// re-read on every dial, never captured at load.
+	//
+	// Neither of RedisPassword's two forms can express a ROTATING credential:
+	// an ElastiCache/Valkey auth token is re-rendered to a file by a
+	// Vault-Agent sidecar, and a literal — or an environment variable, fixed
+	// for the life of the process — goes stale at the first rotation, after
+	// which every new connection fails until Traefik is restarted. Reading per
+	// dial also means a gateway that starts before the sidecar's first render
+	// heals on the next request instead of staying broken.
+	//
+	// Trailing whitespace is trimmed: rendered secret files end in a newline,
+	// and a token with a stray '\n' is refused exactly like a wrong one.
+	//
+	// A path, taken literally: no '$' environment indirection, unlike
+	// RedisPassword. Mutually exclusive with RedisPassword — setting both is
+	// an error at load rather than a silent precedence rule.
+	RedisPasswordFile string `json:"redisPasswordFile,omitempty" yaml:"redisPasswordFile,omitempty"`
 	// Average is the maximum rate, by default in requests/s, allowed for the given source.
 	// It defaults to 0, which means no rate limiting.
 	// The rate is actually defined by dividing Average by Period. So for a rate below 1req/s,
@@ -177,6 +195,15 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 			FailureModeOpen, FailureModeClosed, config.FailureMode)
 	}
 
+	// Checked BEFORE the '$' indirection below, on the values as written: an
+	// unset environment variable would blank RedisPassword and hide the
+	// conflict, so the same config would be rejected on one box and silently
+	// accepted on another.
+	if config.RedisPassword != "" && config.RedisPasswordFile != "" {
+		return nil, fmt.Errorf("redisPassword and redisPasswordFile are mutually exclusive: " +
+			"set one or the other, not both")
+	}
+
 	// if the redis password starts with '$' like $REDIS_PASSWORD
 	// we read it from the environment variable
 	if len(config.RedisPassword) > 1 && config.RedisPassword[0] == '$' {
@@ -264,6 +291,7 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		DB:                config.RedisDB,
 		Username:          config.RedisUsername,
 		Password:          config.RedisPassword,
+		PasswordFile:      config.RedisPasswordFile,
 		ConnectionTimeout: time.Duration(config.RedisConnectionTimeout) * time.Second,
 		TLS:               config.RedisTLS,
 		CACertFile:        config.RedisCaCertFile,
