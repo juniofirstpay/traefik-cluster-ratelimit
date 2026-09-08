@@ -95,6 +95,12 @@ The `average` and the `burst` are the number of allowed connection per second, t
 | redisAddress                | address of the redis server                        | redis:6379 |
 | redisDb                     | redis db to use                                    | 0          |
 | redisPassword               | redis authentication (if any)                      |            |
+| redisUsername               | redis ACL username. Set it to use the two-argument `AUTH <user> <pass>` form (Redis 6+); empty keeps the single-argument form | |
+| redisTls                    | connect over TLS with no trust material of our own — for an endpoint presenting a publicly-rooted certificate. Implied by any of the four below | false |
+| redisCaCertFile             | PEM bundle the server certificate is verified against | |
+| redisClientCertFile         | client certificate for mutual TLS (must be set with the key) | |
+| redisClientKeyFile          | client key for mutual TLS (must be set with the cert) | |
+| redisServerName             | name verified against the server certificate; derived from `redisAddress` when empty | |
 | sourceCriterion.*           | defines what criterion is used to group requests. See next | ipStrategy |
 | sourceCriterion.ipStrategy  | client IP based source                             |            |
 | sourceCriterion.ipStrategy.depth | tells Traefik to use the X-Forwarded-For header and select the IP located at the depth position |    |
