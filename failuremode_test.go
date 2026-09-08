@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/juniofirstpay/traefik-cluster-ratelimit/internal/ip"
 	"github.com/juniofirstpay/traefik-cluster-ratelimit/internal/redis"
 )
 
@@ -42,6 +43,8 @@ func newLimiterUnderOutage(mode string) http.Handler {
 		burst:         10,
 		period:        1,
 		sourceMatcher: fixedSource{},
+		ipStrategy:    &ip.RemoteAddrStrategy{},
+		ipv6Subnet:    64,
 		failureMode:   mode,
 		retryAfter:    15,
 	}

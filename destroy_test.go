@@ -13,6 +13,12 @@ import (
 // captured records the headers the backend actually received.
 func captured(t *testing.T, cfg *Config, set map[string]string) http.Header {
 	t.Helper()
+	return capturedFrom(t, cfg, "10.10.0.7:52000", set)
+}
+
+// capturedFrom is the same with an explicit socket peer.
+func capturedFrom(t *testing.T, cfg *Config, remote string, set map[string]string) http.Header {
+	t.Helper()
 	var got http.Header
 	next := http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		got = r.Header.Clone()
@@ -23,7 +29,7 @@ func captured(t *testing.T, cfg *Config, set map[string]string) http.Header {
 		t.Fatalf("New: %v", err)
 	}
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.RemoteAddr = "10.10.0.7:52000"
+	r.RemoteAddr = remote
 	for k, v := range set {
 		r.Header.Set(k, v)
 	}

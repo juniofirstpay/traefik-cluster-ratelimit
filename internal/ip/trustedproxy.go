@@ -3,6 +3,7 @@ package ip
 import (
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -32,6 +33,13 @@ const (
 // this, so it is a belt-and-braces guard against a parser DoS rather than the
 // primary control. A header longer than this is not a real proxy chain.
 const maxXFFEntries = 32
+
+// Resolver is a Strategy that can also report HOW it arrived at an address.
+// Only the trusted-proxy walk can: depth and pool selection have no notion of
+// which exit they took.
+type Resolver interface {
+	Resolve(req *http.Request) (string, Source)
+}
 
 // TrustedProxyStrategy derives the client address by walking X-Forwarded-For
 // from right to left, skipping addresses in a trusted set and stopping at the
@@ -175,4 +183,22 @@ func Subnet(addr string, ipv6Prefix int) string {
 		return addr
 	}
 	return parsed.Mask(net.CIDRMask(ipv6Prefix, 128)).String()
+}
+
+// SubnetCIDR is Subnet in CIDR notation, for publication rather than for use as
+// a bucket key.
+//
+// The prefix length is the point: bare, "2001:db8:1:1::" is indistinguishable
+// from a client whose address genuinely is 2001:db8:1:1::, so a reader of an
+// audit trail cannot tell an aggregate from a literal. "/64" says which it is,
+// and any CIDR parser will take it.
+func SubnetCIDR(addr string, ipv6Prefix int) string {
+	parsed := net.ParseIP(addr)
+	if parsed == nil {
+		return addr
+	}
+	if parsed.To4() != nil {
+		return addr + "/32"
+	}
+	return parsed.Mask(net.CIDRMask(ipv6Prefix, 128)).String() + "/" + strconv.Itoa(ipv6Prefix)
 }
