@@ -101,6 +101,7 @@ The `average` and the `burst` are the number of allowed connection per second, t
 | redisClientCertFile         | client certificate for mutual TLS (must be set with the key) | |
 | redisClientKeyFile          | client key for mutual TLS (must be set with the cert) | |
 | redisServerName             | name verified against the server certificate; derived from `redisAddress` when empty | |
+| failureMode                 | what happens when Redis is unreachable: `closed` rejects with 503 + Retry-After, `open` lets requests through unlimited. **This fork defaults to `closed`, where upstream fails open** | closed |
 | sourceCriterion.*           | defines what criterion is used to group requests. See next | ipStrategy |
 | sourceCriterion.ipStrategy  | client IP based source                             |            |
 | sourceCriterion.ipStrategy.depth | tells Traefik to use the X-Forwarded-For header and select the IP located at the depth position |    |

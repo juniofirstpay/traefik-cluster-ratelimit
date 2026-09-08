@@ -70,12 +70,32 @@ type Config struct {
 	// RedisServerName is the name verified against the server certificate.
 	// Derived from RedisAddress when empty.
 	RedisServerName string `json:"redisServerName,omitempty" yaml:"redisServerName,omitempty"`
+	// FailureMode decides what happens when the limiter cannot reach Redis:
+	// the breaker is open, the connection failed, or the script errored.
+	//
+	//   "closed" (default) — reject with 503 and a Retry-After. The limit holds
+	//                        as a guarantee; a Redis outage is an outage.
+	//   "open"             — let the request through, unlimited. Availability
+	//                        wins; whoever can take Redis down removes the limit.
+	//
+	// NOTE: this fork DEFAULTS TO CLOSED, where upstream fails open. A limiter
+	// used as a security control should not stop limiting because its store
+	// blinked, and a config that omits this field should not silently pick the
+	// weaker posture. Set it to "open" explicitly for upstream behaviour.
+	FailureMode string `json:"failureMode,omitempty" yaml:"failureMode,omitempty"`
 }
 
 // CreateConfig creates the default plugin configuration.
 func CreateConfig() *Config {
 	return &Config{}
 }
+
+const (
+	// FailureModeOpen lets requests through when the limiter cannot reach Redis.
+	FailureModeOpen = "open"
+	// FailureModeClosed rejects them with 503. This fork's default.
+	FailureModeClosed = "closed"
+)
 
 type ClusterRateLimit struct {
 	next             http.Handler
@@ -87,6 +107,11 @@ type ClusterRateLimit struct {
 	sourceMatcher    utils.SourceExtractor
 	whitelistChecker *ip.Checker
 	ipStrategy       ip.Strategy
+	failureMode      string
+	// retryAfter is what a fail-closed rejection advertises. The breaker's
+	// reattempt period is the honest answer: it is when we will next try Redis,
+	// so it is the earliest moment the answer could change.
+	retryAfter int64
 }
 
 // New created a new ClusterRateLimit plugin.
@@ -111,6 +136,14 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	}
 	if config.RedisConnectionTimeout < 1 {
 		config.RedisConnectionTimeout = 2
+	}
+	switch config.FailureMode {
+	case "":
+		config.FailureMode = FailureModeClosed
+	case FailureModeOpen, FailureModeClosed:
+	default:
+		return nil, fmt.Errorf("failureMode must be %q or %q, got %q",
+			FailureModeOpen, FailureModeClosed, config.FailureMode)
 	}
 
 	// if the redis password starts with '$' like $REDIS_PASSWORD
@@ -179,6 +212,8 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		sourceMatcher:    sourceMatcher,
 		whitelistChecker: whitelistChecker,
 		ipStrategy:       ipStrategy,
+		failureMode:      config.FailureMode,
+		retryAfter:       config.BreakerReattempt,
 	}, nil
 }
 
@@ -216,7 +251,19 @@ func (rl *ClusterRateLimit) ServeHTTP(rw http.ResponseWriter, req *http.Request)
 		Period: time.Duration(rl.period) * time.Second,
 	})
 	if err != nil {
-		rl.next.ServeHTTP(rw, req)
+		// The limiter could not reach its store. Either posture is defensible;
+		// neither is a non-decision, so the mode is explicit.
+		if rl.failureMode == FailureModeOpen {
+			rl.next.ServeHTTP(rw, req)
+			return
+		}
+		// 503, not 429 and not 500: the client is not over its rate, and this
+		// is not an internal error in handling THIS request — the dependency is
+		// unavailable. Retry-After advertises when the breaker will next probe,
+		// which is the earliest the answer could change.
+		rw.Header().Set("retry-after", fmt.Sprintf("%d", rl.retryAfter))
+		http.Error(rw, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		return
 	} else {
 		if res.Allowed <= 0 {
 			retryAfter := int64(res.RetryAfter/time.Second) + 1
