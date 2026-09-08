@@ -83,6 +83,24 @@ type Config struct {
 	// blinked, and a config that omits this field should not silently pick the
 	// weaker posture. Set it to "open" explicitly for upstream behaviour.
 	FailureMode string `json:"failureMode,omitempty" yaml:"failureMode,omitempty"`
+	// TrustedProxies is the set of addresses and CIDRs that are our own
+	// infrastructure. Setting it selects the trusted-proxy walk: anchor on the
+	// socket peer, walk X-Forwarded-For right to left skipping anything in this
+	// set, and take the first address that is not.
+	//
+	// It sits at the top level rather than under sourceCriterion because the
+	// derived address has more than one consumer — the rate-limit bucket key,
+	// the whitelistIPs bypass check, and (once published) the headers offered
+	// to downstream services. sourceCriterion describes only the first of
+	// those, so nesting it there would misdescribe what it configures.
+	//
+	// Mutually exclusive with sourceCriterion.ipStrategy: setting both is an
+	// error at load rather than a silent precedence rule.
+	//
+	// CIDRs, not addresses, for anything elastic. A load balancer runs a node
+	// per subnet and the provider adds and removes them without notice, so an
+	// enumerated list of node addresses rots silently.
+	TrustedProxies []string `json:"trustedProxies,omitempty" yaml:"trustedProxies,omitempty"`
 }
 
 // CreateConfig creates the default plugin configuration.
@@ -156,6 +174,12 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		config.RedisUsername = os.Getenv(config.RedisUsername[1:])
 	}
 
+	hasIPStrategy := config.SourceCriterion != nil && config.SourceCriterion.IPStrategy != nil
+	if len(config.TrustedProxies) > 0 && hasIPStrategy {
+		return nil, fmt.Errorf("trustedProxies and sourceCriterion.ipStrategy are mutually exclusive: " +
+			"set one or the other, not both")
+	}
+
 	sourceMatcher, err := utils.GetSourceExtractor(config.SourceCriterion)
 	if err != nil {
 		return nil, err
@@ -170,14 +194,32 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		}
 	}
 
-	// Initialize IP strategy for whitelist checking
+	// Initialize the IP strategy. It derives the client address for the
+	// whitelist check and, when trustedProxies is set, for the rate-limit key
+	// too — so both stop depending on where in the chain the reader sits.
 	var ipStrategy ip.Strategy
-	if config.SourceCriterion != nil && config.SourceCriterion.IPStrategy != nil {
+	switch {
+	case len(config.TrustedProxies) > 0:
+		checker, cerr := ip.NewChecker(config.TrustedProxies)
+		if cerr != nil {
+			return nil, fmt.Errorf("unable to parse trustedProxies: %v", cerr)
+		}
+		walk := &ip.TrustedProxyStrategy{Checker: checker}
+		ipStrategy = walk
+		// The bucket key follows the same derivation, unless the operator
+		// explicitly buckets by something that is not an IP at all.
+		if config.SourceCriterion == nil ||
+			(config.SourceCriterion.RequestHeaderName == "" && !config.SourceCriterion.RequestHost) {
+			sourceMatcher = utils.ExtractorFunc(func(req *http.Request) (string, int64, error) {
+				return walk.GetIP(req), 1, nil
+			})
+		}
+	case hasIPStrategy:
 		ipStrategy, err = config.SourceCriterion.IPStrategy.Get()
 		if err != nil {
 			return nil, fmt.Errorf("unable to create IP strategy: %v", err)
 		}
-	} else {
+	default:
 		ipStrategy = &ip.RemoteAddrStrategy{}
 	}
 
