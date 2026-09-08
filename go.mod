@@ -1,4 +1,4 @@
-module github.com/nzin/traefik-cluster-ratelimit
+module github.com/juniofirstpay/traefik-cluster-ratelimit
 
 go 1.19
 
