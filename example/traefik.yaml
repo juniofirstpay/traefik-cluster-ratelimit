@@ -36,4 +36,4 @@ log:
 experimental:
   localPlugins:
     cluster-ratelimit:
-      moduleName: github.com/nzin/traefik-cluster-ratelimit
+      moduleName: github.com/juniofirstpay/traefik-cluster-ratelimit

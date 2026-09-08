@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/nzin/traefik-cluster-ratelimit/internal/redis"
+	"github.com/juniofirstpay/traefik-cluster-ratelimit/internal/redis"
 )
 
 // coming from github.com/go-redis/redis_rate/v10

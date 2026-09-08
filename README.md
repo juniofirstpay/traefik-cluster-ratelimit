@@ -16,7 +16,7 @@ The following declaration (given here in YAML) defines the plugin:
 experimental:
   plugins:
     clusterRatelimit:
-      moduleName: "github.com/nzin/traefik-cluster-ratelimit"
+      moduleName: "github.com/juniofirstpay/traefik-cluster-ratelimit"
       version: "v1.1.1"
 ```
 

@@ -17,7 +17,7 @@ services:
     volumes:
       - ./example/traefik.yaml:/etc/traefik/traefik.yaml
       - ./example/dynamic.yaml:/etc/traefik/dynamic.yaml
-      - .:/plugins-local/src/github.com/nzin/traefik-cluster-ratelimit/
+      - .:/plugins-local/src/github.com/juniofirstpay/traefik-cluster-ratelimit/
   target:
     image: nginx
     ports:
